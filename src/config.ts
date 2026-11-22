@@ -13,6 +13,12 @@ export type DeviceConfig = {
   jpegQuality: number;              // 1..100
   maxBytesPerMessage: number;       // bytes (>0)
   rotation: Rotation;               // degrees
+  scale: number;                    // page zoom (device scale factor), 0.5..4
+};
+
+export type InjectScriptConfig = {
+  url?: string;
+  allowHttp: boolean;
 };
 
 const DEFAULTS = {
@@ -25,17 +31,14 @@ const DEFAULTS = {
   jpegQuality: 85,
   maxBytesPerMessage: 14336,
   rotation: 0,
+  scale: 1,
 } as const;
 
-const store = new Map<string, DeviceConfig>();
+const TRUE_RE = /^(1|true|yes|on)$/i;
 
-export function getConfigFor(id: string): DeviceConfig {
-  const cfg = store.get(id);
-  if (!cfg) throw new Error(`config for id="${id}" not found`);
-  return cfg;
-}
-export function setConfigFor(id: string, cfg: DeviceConfig): void {
-  store.set(id, cfg);
+function parseBool(value: string | undefined, defaultValue = false): boolean {
+  if (value == null || value.trim() === "") return defaultValue;
+  return TRUE_RE.test(value);
 }
 
 function num(input?: string | null): number | undefined {
@@ -62,6 +65,12 @@ function float01(input?: string | null): number | undefined {
   if (v < 0 || v > 1) throw new Error(`invalid 0..1 number: "${input}"`);
   return v;
 }
+function scaleFactor(input?: string | null): number | undefined {
+  const v = num(input);
+  if (v == null) return undefined;
+  if (v < 0.5 || v > 4) throw new Error(`invalid scale (0.5..4): "${input}"`);
+  return v;
+}
 const clamp = (n: number, min: number, max: number) => Math.min(max, Math.max(min, n));
 
 function readEnvFallbacks(): Partial<DeviceConfig> {
@@ -76,6 +85,7 @@ function readEnvFallbacks(): Partial<DeviceConfig> {
   const MFI = val("MIN_FRAME_INTERVAL_MS");
   const Q = val("JPEG_QUALITY");
   const MBPM = val("MAX_BYTES_PER_MESSAGE");
+  const SC = val("SCALE");
 
   if (TS) out.tileSize = intPos(TS)!;
   if (FFTC) out.fullFrameTileCount = intPos(FFTC)!;
@@ -85,6 +95,7 @@ function readEnvFallbacks(): Partial<DeviceConfig> {
   if (MFI != null) out.minFrameInterval = intNonNeg(MFI)!;
   if (Q) out.jpegQuality = clamp(intPos(Q)!, 1, 100);
   if (MBPM) out.maxBytesPerMessage = intPos(MBPM)!;
+  if (SC) out.scale = scaleFactor(SC)!;
 
   return out;
 }
@@ -108,6 +119,7 @@ export function makeConfigFromParams(params: URLSearchParams): DeviceConfig {
   const maxBytesPerMessage = intPos(params.get("mbpm")) ?? envFallbacks.maxBytesPerMessage ?? DEFAULTS.maxBytesPerMessage;
   const rotation = intNonNeg(params.get("r")) as 0 | 90 | 180 | 270 | undefined
     ?? DEFAULTS.rotation;
+  const scale = scaleFactor(params.get("s")) ?? envFallbacks.scale ?? DEFAULTS.scale;
 
   const dimensions = getRotatedDimensions(width, height, rotation);
 
@@ -123,6 +135,7 @@ export function makeConfigFromParams(params: URLSearchParams): DeviceConfig {
     jpegQuality,
     maxBytesPerMessage,
     rotation,
+    scale,
   };
 }
 
@@ -142,7 +155,8 @@ export function deviceConfigsEqual(
     a.minFrameInterval === b.minFrameInterval &&
     a.jpegQuality === b.jpegQuality &&
     a.maxBytesPerMessage === b.maxBytesPerMessage &&
-    a.rotation === b.rotation
+    a.rotation === b.rotation &&
+    Math.abs(a.scale - b.scale) <= eps
   );
 }
 
@@ -159,10 +173,23 @@ export function logDeviceConfig(id: string, cfg: DeviceConfig): void {
     ["jpegQuality", cfg.jpegQuality],
     ["maxBytesPerMessage", cfg.maxBytesPerMessage],
     ["rotation", cfg.rotation],
+    ["scale", cfg.scale],
   ];
 
   const head = `[client_connect] id=${id}`;
   const body = entries.map(([k, v]) => `  ${k}=${v}`).join('\n');
 
   console.info(`${head}\n${body}`);
+}
+
+export function readInjectScriptConfig(): InjectScriptConfig {
+  const urlRaw = env.get("INJECT_JS_URL").asString();
+  const url = urlRaw && urlRaw.trim() !== "" ? urlRaw.trim() : undefined;
+  const allowHttpRaw = env.get("INJECT_JS_ALLOW_HTTP").asString();
+  const allowHttp = parseBool(allowHttpRaw, false);
+
+  return {
+    url,
+    allowHttp,
+  };
 }
